@@ -1,0 +1,158 @@
+type: entities
+title: ESPHome Devices Status
+card_mod:
+  style: |
+    ha-card {
+      border: solid 3px grey;
+      box-shadow: none;
+    }
+entities:
+  - entity: input_select.esphome_sort_by
+    type: custom:multiple-entity-row
+    name: false
+    state_color: true
+    show_state: false
+    column: false
+    entities:
+      - entity: sensor.status_esphome
+        name: Всего
+        state_color: true
+        tap_action:
+          action: call-service
+          service: input_boolean.toggle
+          service_data:
+            entity_id: input_boolean.smoke_alert
+      - entity: sensor.status_esphome_off
+        name: Offline
+        state_color: true
+      - entity: input_boolean.show_uptime
+        name: Uptime
+        state_color: true
+        icon: mdi:toggle-switch-variant
+        tap_action:
+          action: call-service
+          service: input_boolean.toggle
+          service_data:
+            entity_id: input_boolean.show_uptime
+      - entity: input_boolean.show_wifi
+        name: WiFi
+        state_color: true
+        icon: mdi:toggle-switch-variant
+        tap_action:
+          action: call-service
+          service: input_boolean.toggle
+          service_data:
+            entity_id: input_boolean.show_wifi
+      - entity: input_boolean.show_ip
+        name: IP
+        state_color: true
+        icon: mdi:toggle-switch-variant
+        tap_action:
+          action: call-service
+          service: input_boolean.toggle
+          service_data:
+            entity_id: input_boolean.show_ip
+      - entity: input_boolean.show_reboot
+        name: Reboot
+        state_color: true
+        icon: mdi:toggle-switch-variant
+        tap_action:
+          action: call-service
+          service: input_boolean.toggle
+          service_data:
+            entity_id: input_boolean.show_reboot
+  - type: custom:auto-entities
+    card:
+      type: entities
+      show_header_toggle: false
+    filter:
+      template: >
+        {# Получаем все binary_sensor с device_class connectivity #} {% set
+        devices = states.binary_sensor | selectattr('attributes.device_class',
+        'equalto', 'connectivity') | list %}
+
+        {# Получаем выбранный способ сортировки #} {% set sort_by =
+        states('input_select.esphome_sort_by') %}
+
+        {# Функция для безопасного получения имени для сортировки #} {% macro
+        get_sort_key(dev) %}
+          {% if sort_by == 'friendly_name' %}
+            {{ dev.attributes.friendly_name | default(dev.entity_id) }}
+          {% else %}
+            {{ dev.entity_id }}
+          {% endif %}
+        {% endmacro %}
+
+        {# Сортируем устройства #} {% set devices_sorted = devices |
+        sort(attribute='entity_id') %} {% if sort_by == 'friendly_name' %}
+          {% set devices_sorted = devices | sort(attribute='attributes.friendly_name', reverse=false) %}
+        {% elif sort_by == 'entity_id' %}
+          {% set devices_sorted = devices | sort(attribute='entity_id', reverse=false) %}
+        {% endif %}
+
+        {# Разделяем на онлайн и оффлайн #} {% set devices_online =
+        devices_sorted | selectattr('state', 'equalto', 'on') | list %} {% set
+        devices_offline = devices_sorted | selectattr('state', 'ne', 'on') |
+        list %}
+
+        {# Макрос для формирования словаря устройства #} {% macro
+        device_to_dict(device, online=True) %}
+          {# Извлекаем базовое имя из entity_id #}
+          {% set base = device.entity_id | regex_replace('^binary_sensor\\.(.+)_status$', '\\1') %}
+
+          {% set uptime = [] %}
+          {% set wifi = [] %}
+          {% set ip = [] %}
+          {% set reboot = [] %}
+
+          {% if online %}
+            {% if is_state('input_boolean.show_uptime', 'on') %}
+              {% set uptime = [{"entity": "sensor." + base + "_uptime", "name": "Uptime"}] %}
+            {% endif %}
+            {% if is_state('input_boolean.show_wifi', 'on') %}
+              {% set wifi = [{"entity": "sensor." + base + "_wifi_signal", "name": "WiFi"}] %}
+            {% endif %}
+            {% if is_state('input_boolean.show_ip', 'on') %}
+              {% set ip = [{"entity": "sensor." + base + "_esp_ip_address", "name": "IP"}] %}
+            {% endif %}
+            {% if is_state('input_boolean.show_reboot', 'on') %}
+              {% set reboot = [{
+                "type": "button",
+                "name": "Reboot",
+                "tap_action": {
+                  "action": "call-service",
+                  "service": "button.press",
+                  "service_data": {"entity_id": "button." + base + "_esp_reboot"}
+                },
+                "icon": "mdi:restart"
+              }] %}
+            {% endif %}
+          {% endif %}
+
+          {% set entities_list = uptime + wifi + ip + reboot %}
+
+          {{
+            {
+              "entity": device.entity_id,
+              "type": "custom:multiple-entity-row",
+              "secondary_info": "last-changed",
+              "entities": entities_list,
+              "show_state": false,
+              "state_color": true
+            }
+          }}
+        {% endmacro %}
+
+        [
+          {"type": "section", "label": "Online Devices"},
+          {% for device in devices_online %}
+            {{ device_to_dict(device, online=True) }}{% if not loop.last or devices_offline|length > 0 %},{ "type": "divider" },{% endif %}
+          {% endfor %}
+
+          {% if devices_offline | length > 0 %}
+            {"type": "section", "label": "Offline Devices"},
+            {% for device in devices_offline %}
+              {{ device_to_dict(device, online=False) }}{% if not loop.last %},{ "type": "divider" },{% endif %}
+            {% endfor %}
+          {% endif %}
+        ]
