@@ -32,5 +32,5 @@
 *(Добавьте сюда скриншоты дисплея, HA дашборда или видео демонстрации)*
 
 - [yaml файл](esphome_devices_status_card.yaml)
-- [скриншот](/img/esphome_devices_status_card.jpg)
+- [скриншот](img/esphome_devices_status_card.jpg)
 - [Видео](https://t.me/parus_smart/68/9162)
