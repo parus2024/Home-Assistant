@@ -1,0 +1,404 @@
+# made @krym_parus ©
+# Создайте с этим YAML-код пакет /homeassistant/packages/device_status.yaml  или по вашему пути, где находятся packages
+# Должна быть установлена карточка для авто сбора данных интеграции ESPHome и просмотра статуса устройств и их атрибутов в Home Assistant.
+# Установите кастомные компоненты custom:multiple-entity-row и custom:auto-entities
+# В устройствах esphome должен быть установлен сенсор status, сенсоры версии прошивки и активированы сущности обновления прошивки
+######### Вставьте шаблон ниже для Developer Tools → Templates, который сгенерирует YAML для input_boolean, котоорые нужно использовать в этом package
+#{% for entity in states.sensor
+#   | selectattr('entity_id', 'search', 'esphome_version')
+#%}
+#  {{ entity.entity_id.replace('sensor.', '').replace('_esphome_version', '') }}_esphome_update:
+#    name: "Update {{ entity.entity_id.replace('sensor.', '').replace('_esphome_version', '') }}"
+#{% endfor %}
+#              | rejectattr('entity_id', 'equalto', 'input_boolean.esphome_update')
+#########
+  input_button:
+    update_esphome:
+      name: update_esphome
+  input_text:
+    sorted_devices:
+      name: Sorted ESPHome Devices
+      max: 255
+  input_select:
+    esphome_sort_by:
+      name: Сортировка устройств
+      options:
+        - entity_id
+        - friendly_name
+      initial: entity_id
+  automation:
+    - alias: Запуск скрипта обновления ESPHome по кнопке
+      trigger:
+        - platform: state
+          entity_id: input_button.update_esphome
+      action:
+        - service: script.update_selected_esphome_sequential
+    - alias: "Sync choose_all with all update input_booleans"
+      description: >
+        При включении choose_all включаем все input_boolean с суффиксом _update,
+        при выключении — выключаем все.
+        Если choose_all не меняется, ручной выбор доступен.
+      trigger:
+        - platform: state
+          entity_id: input_boolean.choose_all
+      action:
+        - variables:
+            all_update_bools: >
+              {{ states.input_boolean
+                 | selectattr('entity_id', 'search', '_esphome_update$')
+                 | rejectattr('entity_id', 'equalto', 'input_boolean.choose_all')
+                 | map(attribute='entity_id')
+                 | list }}
+        - choose:
+            - conditions:
+                - condition: state
+                  entity_id: input_boolean.choose_all
+                  state: 'on'
+              sequence:
+                - service: input_boolean.turn_on
+                  target:
+                    entity_id: "{{ all_update_bools }}"
+            - conditions:
+                - condition: state
+                  entity_id: input_boolean.choose_all
+                  state: 'off'
+              sequence:
+                - service: input_boolean.turn_off
+                  target:
+                    entity_id: "{{ all_update_bools }}"
+
+  script:
+    update_selected_esphome_sequential:
+      alias: Update Selected ESPHome Sequentially
+      mode: single
+      variables:
+        devices: >
+          {%- set update_booleans = states.input_boolean
+              | selectattr('entity_id', 'search', '_esphome_update')
+              | list -%}
+
+          {%- set ns = namespace(update_entities_str='') -%}
+
+          {%- for entity in update_booleans -%}
+            {%- set entity_id = entity.entity_id -%}
+            {%- set base = entity_id.split('.')[1].replace('_esphome_update', '') -%}
+            {%- set update_entity = 'update.' + base + '_firmware' -%}
+            {%- if entity.state == 'on' and states(update_entity) == 'on' -%}
+              {%- if ns.update_entities_str == '' -%}
+                {%- set ns.update_entities_str = update_entity -%}
+              {%- else -%}
+                {%- set ns.update_entities_str = ns.update_entities_str + ',' + update_entity -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+
+          {# Преобразуем строку в список #}
+          {%- if ns.update_entities_str == '' -%}
+            []
+          {%- else -%}
+            {{ ns.update_entities_str.split(',') }}
+          {%- endif -%}
+        success_devices: []
+        message: >
+          Начато поочередное обновление следующих {{ devices | length }} устройств ESPHome: {{ devices }}
+          Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}.
+      sequence:
+        - condition: template
+          value_template: "{{ devices | length > 0 }}"
+        - service: persistent_notification.create
+          data:
+            title: "ESPHome Update"
+            message: "{{ message }}"
+        - repeat:
+            for_each: "{{ devices }}"
+            sequence:
+              - condition: state
+                entity_id: input_boolean.stop_update
+                state: 'off'
+              # Создаем helper для отслеживания первого таймаута
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.first_timeout_processed
+              - service: script.turn_on
+                target:
+                  entity_id: script.start_update
+                data:
+                  variables:
+                    entity_id: "{{ repeat.item }}"
+              - delay:
+                  seconds: 3
+               # Отправляем уведомление только если включён input_boolean.esphome_log
+              - choose:
+                  - conditions:
+                      - condition: state
+                        entity_id: input_boolean.esphome_log
+                        state: 'on'
+                    sequence:
+                      - service: persistent_notification.create
+                        data:
+                          title: "ESPHome Update"
+                          message: >
+                            Попытка обновления {{ repeat.item }}.|
+                            Устройство<<: {{ repeat.item }} |
+                            In_progress: {{ state_attr(repeat.item, 'in_progress') }}|
+                            State: {{ states(repeat.item) }} >> |
+                            Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}.
+
+              # 🔹 Первый таймаут: проверяем, началось ли обновление (2 минуты)
+              - wait_template: >
+                  {{ state_attr(repeat.item, 'in_progress') == false }}
+                timeout: '00:02:00'
+                continue_on_timeout: true
+              
+              # Проверяем результат первого таймаута
+              - choose:
+                  - conditions:
+                      # (1)✅ Обновление началось успешно
+                      - condition: template
+                        value_template: >
+                          {{ state_attr(repeat.item, 'in_progress') == true }}
+                    sequence:
+                      # 🔹 Второй таймаут: ждем завершения обновления (25 минут)
+                      - service: input_boolean.turn_on
+                        target:
+                          entity_id: input_boolean.first_timeout_processed
+                      # Отправляем уведомление только если включён input_boolean.esphome_log
+                      - choose:
+                          - conditions:
+                              - condition: state
+                                entity_id: input_boolean.esphome_log
+                                state: 'on'
+                            sequence:
+                              - service: persistent_notification.create
+                                data:
+                                  title: "ESPHome Update"
+                                  message: >
+                                    Обновление {{ repeat.item }} успешно начато.| 
+                                    Флаг {{ states('input_boolean.first_timeout_processed') }}. Ждем 25 минут.
+                                    Устройство:<< {{ repeat.item }} |
+                                    in_progress: {{ state_attr(repeat.item, 'in_progress') }} |
+                                    State: {{ states(repeat.item) }} >>
+                                    Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}.
+                      - wait_template: >
+                          {{ state_attr(repeat.item, 'in_progress') == false and is_state(repeat.item, 'off') }}
+                        timeout: '00:25:00'
+                        continue_on_timeout: true
+                      # После второго таймаута проверяем результат
+                      - choose:
+                          - conditions:
+                              # ✅ Успешно завершено
+                              - condition: template
+                                value_template: >
+                                  {{ is_state(repeat.item, 'off') }}
+#                                  {{ state_attr(repeat.item, 'in_progress') == false and is_state(repeat.item, 'off') }}
+                            sequence:
+                              - variables:
+                                  success_devices: "{{ success_devices + [repeat.item] }}"
+                              - condition: state
+                                entity_id: input_boolean.esphome_log
+                                state: 'on'
+                              - service: persistent_notification.create
+                                data:
+                                  title: "ESPHome Update"
+                                  message: >
+                                    Обновление успешно завершено.
+                                    Устройство:<< {{ repeat.item }} |
+                                    in_progress: {{ state_attr(repeat.item, 'in_progress') }} |
+                                    State: {{ states(repeat.item) }} >>
+                                    Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}.
+                          - conditions:
+                              # ❌ Завершено с ошибкой 
+                              - condition: template
+                                value_template: >
+                                  {{ state_attr(repeat.item, 'in_progress') == false 
+                                     and is_state(repeat.item, 'on')
+                                     and is_state('input_boolean.first_timeout_processed', 'on')
+                                     and (as_timestamp(now()) - as_timestamp(states[repeat.item].last_changed)) >= 60 }}
+#                                  {{ state_attr(repeat.item, 'in_progress') == false and is_state(repeat.item, 'on') }}
+                            sequence:
+                              - condition: state
+                                entity_id: input_boolean.esphome_log
+                                state: 'on'
+                              - service: persistent_notification.create
+                                data:
+                                  title: "ESPHome Update"
+                                  message: >
+                                    Попытка обновления завершилась с ошибкой.
+                                    Устройство:<< {{ repeat.item }} |
+                                    In_progress: {{ state_attr(repeat.item, 'in_progress') }} |
+                                    State: {{ states(repeat.item) }} >>
+                                    Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}
+                          - conditions:
+                              # ⏰ Таймаут второго ожидания
+                              - condition: template
+                                value_template: >
+                                  {{ state_attr(repeat.item, 'in_progress') == true }}
+                            sequence:
+                              - condition: state
+                                entity_id: input_boolean.esphome_log
+                                state: 'on'
+                              - service: persistent_notification.create
+                                data:
+                                  title: "ESPHome Update"
+                                  message: >
+                                    Истек таймаут 25мин ожидания завершения обновления.
+                                    Устройство:<< {{ repeat.item }} |
+                                    in_progress: {{ state_attr(repeat.item, 'in_progress') }} |
+                                    State: {{ states(repeat.item) }} >>
+                                    Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}.
+                  - conditions:
+                      # (2)❌ ⏰ ТаймаутОбновление не началось (ошибка конфигурации и т.п.)
+                      - condition: template
+                        value_template: >
+                          {{ state_attr(repeat.item, 'in_progress') == false 
+                             and is_state(repeat.item, 'on')
+                             and is_state('input_boolean.first_timeout_processed', 'off')
+                             and (as_timestamp(now()) - as_timestamp(states[repeat.item].last_changed)) >= 60 }}
+#                          {{ state_attr(repeat.item, 'in_progress') == false 
+#                             and is_state(repeat.item, 'on')
+#                             and is_state('input_boolean.first_timeout_processed', 'off') }}
+                    sequence:
+                      - condition: state
+                        entity_id: input_boolean.esphome_log
+                        state: 'on'
+                      - service: persistent_notification.create
+                        data:
+                          title: "ESPHome Update"
+                          message: >
+                            Обновление не началось - возможно ошибка конфигурации.
+                            Устройство:<< {{ repeat.item }} |
+                            In_progress: {{ state_attr(repeat.item, 'in_progress') }} |
+                            State: {{ states(repeat.item) }} >>
+                            Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}
+        - service: persistent_notification.create
+          data:
+            title: "ESPHome Update"
+            message: >
+              Обновление выбранных устройств завершено.
+              {% if success_devices | length > 0 %}
+              Успешно обновлено устройств: {{ success_devices | length }} |
+              {% for dev in success_devices %}
+              << {{ dev }} >>
+              {% endfor %}
+              {% else %}
+              Нет успешно обновленных устройств.
+              {% endif %}
+              Время: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}.
+    start_update:
+      alias: "Start ESPHome update"
+      mode: single
+      fields:
+        entity_id:
+          description: "Entity ID to update"
+          example: "update.my_light_bulb"
+      sequence:
+        - service: update.install
+          target:
+            entity_id: "{{ entity_id }}"
+  template:
+    - sensor:   
+        - name: status_esphome
+          state: >
+              {% set variable = namespace(value = {}) %}
+              {% for entity in states.binary_sensor if states(entity.entity_id)   
+              and is_state_attr(entity.entity_id, 'device_class', 'connectivity') %}
+               {% set variable.value = dict(variable.value, **{entity.name: entity.state }) %}
+              {% endfor %}
+              {% if (variable.value | length) | int > 0 %}
+              {{ variable.value | length }}
+              {% else %}
+               0
+              {% endif %}
+        - name: status_esphome_off
+          state: >
+              {% set variable = namespace(value = {}) %}
+              {% for entity in states.binary_sensor if is_state(entity.entity_id, 'off')   
+              and is_state_attr(entity.entity_id, 'device_class', 'connectivity') %}
+               {% set variable.value = dict(variable.value, **{entity.name: entity.state }) %}
+              {% endfor %}
+              {% if (variable.value | length) | int > 0 %}
+              {{ variable.value | length }}
+              {% else %}
+               0
+              {% endif %}
+          attributes:
+            list_entities: >
+              {% set variable = namespace(value = {}) %}
+              {% for entity in states.binary_sensor if is_state(entity.entity_id, 'off')   
+                and is_state_attr(entity.entity_id, 'device_class', 'connectivity') %}
+               {% set variable.value = dict(variable.value, **{entity.name: entity.state }) %}
+              {% endfor %}
+              {{ variable.value |dictsort(false, 'value') }}
+        - name: status_zigbee
+          state: >
+              {% set variable = namespace(value = {}) %}
+              {% for entity in states.binary_sensor if states(entity.entity_id)   
+              and is_state_attr(entity.entity_id, 'device_class', 'problem') %}
+               {% set variable.value = dict(variable.value, **{entity.name: entity.state }) %}
+              {% endfor %}
+              {% if (variable.value | length) | int > 0 %}
+              {{ variable.value | length }}
+              {% else %}
+               0
+              {% endif %}
+        - name: status_zigbee_off
+          state: >
+              {% set variable = namespace(value = {}) %}
+              {% for entity in states.binary_sensor if is_state(entity.entity_id, 'on')   
+              and is_state_attr(entity.entity_id, 'device_class', 'problem') %}
+               {% set variable.value = dict(variable.value, **{entity.name: entity.state }) %}
+              {% endfor %}
+              {% if (variable.value | length) | int > 0 %}
+              {{ variable.value | length }}
+              {% else %}
+               0
+              {% endif %}
+          attributes:
+            list_entities: >
+              {% set variable = namespace(value = {}) %}
+              {% for entity in states.binary_sensor if is_state(entity.entity_id, 'on')   
+                and is_state_attr(entity.entity_id, 'device_class', 'problem') %}
+               {% set variable.value = dict(variable.value, **{entity.name: entity.state }) %}
+              {% endfor %}
+              {{ variable.value |dictsort(false, 'value') }}
+  input_boolean:
+    show_uptime:
+      name: Show Uptime
+      initial: true
+    show_wifi:
+      name: Show WiFi
+      initial: true
+    show_ip:
+      name: Show IP
+      initial: true
+    show_reboot:
+      name: Show Reboot
+      initial: true
+    show_lqi:
+      name: Show lqi
+      initial: true
+    show_battery:
+      name: Show Battery
+      initial: true
+    show_last_seen:
+      name: Show last seen
+      initial: true
+    show_update:
+      name: "Show Update"
+    stop_update:
+      name: Stop Update
+    choose_all:
+      name: choose_all
+    first_timeout_processed:
+      name: first_timeout_processed
+    esphome_log:
+      name: esphome_log
+##### тут должны быть input_boolean на каждое ВАШЕ устройство - All devices с помощью шаблона!#####
+    device1_esphome_update:
+      name: "Update device1"
+
+    device2_esphome_update:
+      name: "Update device2"
+
+    device3_esphome_update:
+      name: "Update device3"
