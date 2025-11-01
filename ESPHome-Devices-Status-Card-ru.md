@@ -31,7 +31,7 @@
 ## 📊 Скриншоты и Видео
 
 - [yaml карточки](esphome_devices_status_card.yaml)
-- [yaml package](package_esphome_devices_status_card.yaml)
+- [yaml package](package_esphome_devices_status_update.yaml)
 - [скриншот1](img/esphome_devices_status_card.jpg)
 - [скриншот2](img/esphome_devices_status_card2.jpg)
 - [Видео](https://t.me/parus_smart/68/9162)
